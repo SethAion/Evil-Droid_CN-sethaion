@@ -33,7 +33,7 @@ git clone https://github.com/SethAion/Evil-Droid_CN-sethaion.git
 2️⃣ 配置权限
 
  
-cd Evil-Droid  
+cd Evil-Droid_CN-sethaion  
 chmod +x evil-droid  
  
 
